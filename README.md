@@ -1,3 +1,5 @@
+```Special Note: I've been struggling with an aspect of github copilot and something that I think degrades the code ouput. This repo will serve as a testing ground. Next update will be posted here.```
+
 # TRM Simulation with Ollama
 
 A Python implementation that simulates the Tiny Recursion Model (TRM) recursive reasoning process using your local Ollama instance. This allows you to experiment with TRM-style reasoning without training models from scratch.
