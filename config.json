@@ -1,0 +1,7 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "model": "qwen2.5-coder:14b",
+  "timeout": 60,
+  "ollama_timeout": 2000,
+  "ollama_retries": 3
+}
