@@ -48,13 +48,15 @@ def install():
     for d in [BASE, WIKI_DIR, TESTS_DIR]:
         d.mkdir(exist_ok=True)
 
-    if not SOUL_FILE.exists():
-        soul = {}
-        soul['name'] = prompt("What is your agent name?")
-        soul['purpose'] = prompt("What is its core purpose?")
-        soul['developer'] = prompt("Developer/Owner name?")
-        write_file(SOUL_FILE, json.dumps(soul, indent=2))
-        print("Soul file created.")
+    if SOUL_FILE.exists():
+        SOUL_FILE.unlink()
+
+    soul = {}
+    soul['name'] = prompt("What is your agent name?")
+    soul['purpose'] = prompt("What is its core purpose?")
+    soul['developer'] = prompt("Developer/Owner name?")
+    write_file(SOUL_FILE, json.dumps(soul, indent=2))
+    print("Soul file created.")
 
     if not MODE_FILE.exists():
         write_file(MODE_FILE, json.dumps({"mode":"cli"}))
@@ -121,23 +123,28 @@ def start_heartbeat(name: str, interval: int, job: Callable):
 # -----------------------------
 # LLM Backend
 # -----------------------------
-def call_llm(messages: list, tools: list = None):
+def call_llm(messages: list, tools: list = None, max_tokens: int = 4096):
     """Call a local LMStudio instance or OpenAI if API key set."""
     if OPENAI_KEY:
         import openai
         openai.api_key = OPENAI_KEY
-        kwargs = {"model": "gpt-4o-mini", "messages": messages}
+        kwargs = {"model": "gpt-4o-mini", "messages": messages, "max_tokens": max_tokens}
         if tools:
              kwargs["tools"] = tools
         # Handle v0.28 format used in this script historically
-        return openai.ChatCompletion.create(**kwargs)["choices"][0]["message"]
+        resp = openai.ChatCompletion.create(**kwargs)["choices"][0]
+        return resp["message"], resp.get("finish_reason")
     else:
         import requests
-        payload = {"model":"local-model","messages":messages}
+        payload = {"model":"local-model","messages":messages, "max_tokens": max_tokens}
         if tools:
             payload["tools"] = tools
         r = requests.post(LM_LOCAL_URL + "/v1/chat/completions", json=payload)
-        return r.json()["choices"][0]["message"]
+        res_data = r.json()
+        if "choices" not in res_data:
+            err_msg = res_data.get("error", {}).get("message", str(res_data))
+            raise ValueError(f"LLM API Error: {err_msg}")
+        return res_data["choices"][0]["message"], res_data["choices"][0].get("finish_reason")
 
 def agent_loop(prompt_text: str, chat_history: list = None):
     """Multi-turn evaluation loop using native OpenAI Function Calling logic."""
@@ -195,14 +202,45 @@ If no further tool use is needed, respond with normal human text out-of-band dir
     if chat_history is None:
         chat_history = []
 
+    estimator_msg = [{"role": "user", "content": f"Estimate the maximum number of tokens required to fulfill this request: '{prompt_text}'. Provide your answer as a single integer and nothing else."}]
+    print("[Estimating token limit...]")
+    try:
+        est_msg, _ = call_llm(estimator_msg, max_tokens=100)
+        numbers = re.findall(r'\d+', est_msg.get("content", ""))
+        if numbers:
+            est_tokens = max(500, min(int(numbers[-1]), 8192))
+        else:
+            est_tokens = 4096
+    except Exception as e:
+        print(f"[Estimation failed: {e}. Defaulting to 4096]")
+        est_tokens = 4096
+    print(f"[Estimated token limit set to: {est_tokens}]")
+
     messages = [{"role": "system", "content": system_prompt}] + chat_history
     messages.append({"role": "user", "content": prompt_text})
     
     while True:
         # Fetch dict object rather than plain text
-        message = call_llm(messages, tools)
+        message, finish_reason = call_llm(messages, tools, max_tokens=est_tokens)
         messages.append(message)
         
+        if finish_reason == "length":
+            summarize_prompt = "You hit your token limit. Summarize what you have accomplished so far in 1-2 sentences. Do not try to continue. Only provide the summary."
+            try:
+                sum_msg, _ = call_llm(messages + [{"role": "user", "content": summarize_prompt}], max_tokens=250)
+                summary = sum_msg.get("content", "No summary provided.")
+            except Exception:
+                summary = "Failed to generate summary."
+            print(f"\n[Agent paused at token limit ({est_tokens})]")
+            print(f"Progress Summary: {summary.strip()}")
+            ans = prompt("Continue generating? [y/n]")
+            if ans.lower() == 'y':
+                messages.append({"role": "user", "content": "Please continue exactly where you left off."})
+                continue
+            else:
+                print("Run aborted by user.")
+                return message.get("content", "Aborted at length limit.")
+
         tool_calls = message.get("tool_calls")
         if not tool_calls:
             # The agent has finalized execution and responded with conversational text
